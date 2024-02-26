@@ -8,6 +8,7 @@ import { Article } from './article.entity';
 import { IArticleRO, IArticlesRO, ICommentsRO } from './article.interface';
 import { Comment } from './comment.entity';
 import { CreateArticleDto, CreateCommentDto } from './dto';
+import { Tag } from '../tag/tag.entity';
 
 @Injectable()
 export class ArticleService {
@@ -19,6 +20,8 @@ export class ArticleService {
     private readonly commentRepository: EntityRepository<Comment>,
     @InjectRepository(User)
     private readonly userRepository: EntityRepository<User>,
+    @InjectRepository(Tag)
+    private readonly tagRepository: EntityRepository<Tag>,
   ) {}
 
   async findAll(userId: number, query: Record<string, string>): Promise<IArticlesRO> {
@@ -154,10 +157,28 @@ export class ArticleService {
       { populate: ['followers', 'favorites', 'articles'] },
     );
     const article = new Article(user!, dto.title, dto.description, dto.body);
-    article.tagList.push(...dto.tagList);
+  
+    let tagNames = Array.isArray(dto.tagList) ? dto.tagList : dto.tagList.split(',').map(tag => tag.trim());
+    article.tagList = tagNames
+    
+    // Process the tags
+    const tagsToCreate = [];
+    for (const tagName of tagNames) {
+      let tag = await this.tagRepository.findOne({ tag: tagName });
+      if (!tag) {
+        tag = this.tagRepository.create({ tag: tagName });
+        tagsToCreate.push(tag);
+      }
+    }
+  
+    if (tagsToCreate.length > 0) {
+      await this.tagRepository.persistAndFlush(tagsToCreate);
+    }
+
     user?.articles.add(article);
     await this.em.flush();
 
+  
     return { article: article.toJSON(user!) };
   }
 
@@ -172,8 +193,41 @@ export class ArticleService {
 
     return { article: article!.toJSON(user!) };
   }
+  
 
   async delete(slug: string) {
-    return this.articleRepository.nativeDelete({ slug });
+    const article = await this.articleRepository.findOne({ slug }, { populate: ['tagList'] });
+    if (!article) {
+      throw new Error('Article not found');
+    }
+  
+    // Get a list of tags before deleting the article
+    const tagsBeforeDeletion = article.tagList;
+  
+    // Delete the article
+    await this.articleRepository.removeAndFlush(article);
+  
+    // After deletion, find out if any of the tags are now orphaned
+    const orphanTags = [];
+    for (const tag of tagsBeforeDeletion) {
+      const tagEntity = await this.tagRepository.findOne({ tag: tag });
+      const isTagOrphan = !(await this.articleRepository.findOne({ tagList: [tag] }));
+      if (isTagOrphan) {
+        orphanTags.push(tagEntity);
+      }
+    }
+  
+    // If there are orphan tags, remove them
+    if (orphanTags.length > 0) {
+      await this.tagRepository.removeAndFlush(orphanTags);
+    }
+  
+    // Update the frontend state to remove the orphaned tags
+    // You would need to implement a method in your HomeStoreService similar to addTags
+    // but for removing tags, let's call it removeTags for this example
+    // this.homeStoreService.removeTags(orphanTags.map(tag => tag.tag));
+  
+    return { message: 'Article deleted successfully' };
   }
+  
 }
